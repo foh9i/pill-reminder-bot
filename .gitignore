@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+data/
+data_local/
+data_test/
+*.log
+.env

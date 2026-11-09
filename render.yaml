@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: pill-reminder-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: WEBHOOK_PATH
+        value: /webhook
+      - key: TZ
+        value: Europe/Moscow
