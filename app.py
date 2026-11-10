@@ -170,6 +170,98 @@ def normalize_items(raw_items) -> list:
     return items
 
 
+# ---------------------------------------------------------------- bot commands
+
+EVERY_DAY = [0, 1, 2, 3, 4, 5, 6]
+DAY_WORDS = {
+    "пн": 0, "понедельник": 0, "вт": 1, "вторник": 1, "ср": 2, "среда": 2,
+    "чт": 3, "четверг": 3, "пт": 4, "пятница": 4, "сб": 5, "суббота": 5,
+    "вс": 6, "воскресенье": 6,
+}
+DAY_LABELS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+HELP_TEXT = (
+    "💊 Напоминания о лекарствах\n"
+    "\n"
+    "Команды:\n"
+    "/add 09:30 Амоксициллин 2 — добавить приём (время, название, кол-во)\n"
+    "/add 21:00 Витамин 1 пн ср пт — только в эти дни недели\n"
+    "/list — показать расписание\n"
+    "/del 2 — удалить приём под номером 2 (номера видно в /list)\n"
+    "/on — включить напоминания\n"
+    "/off — временно выключить напоминания\n"
+    "/clear — удалить всё расписание\n"
+    "\n"
+    "Время — по московскому времени. Настройки можно менять и в веб-интерфейсе."
+)
+
+
+def parse_add(text: str):
+    """Parse '/add 09:30 Амоксициллин 2 пн ср' into (item, error_message)."""
+    raw = text[len("/add"):].strip()
+    if not raw:
+        return None, "Укажите время и название: /add 09:30 Амоксициллин 2"
+    tokens = raw.split()
+    try:
+        hh, mm = tokens[0].split(":")
+        hh, mm = int(hh), int(mm)
+        if not (0 <= hh <= 23 and 0 <= mm <= 59):
+            raise ValueError
+    except (ValueError, IndexError):
+        return None, "Не понял время. Формат: /add 09:30 Название [кол-во] [дни недели]"
+
+    days = []
+    rest = []
+    for token in tokens[1:]:
+        parts = [p.strip().lower() for p in token.split(",") if p.strip()]
+        if parts and all(p in DAY_WORDS for p in parts):
+            for p in parts:
+                if DAY_WORDS[p] not in days:
+                    days.append(DAY_WORDS[p])
+        elif parts and all(p in ("ежедневно", "каждый", "день", "daily", "everyday") for p in parts):
+            days = list(EVERY_DAY)
+        else:
+            rest.append(token)
+
+    doses = 1
+    if rest and rest[-1].isdigit():
+        doses = max(1, min(20, int(rest[-1])))
+        rest = rest[:-1]
+
+    name = " ".join(rest).strip()
+    if not name:
+        return None, "Укажите название лекарства: /add 09:30 Амоксициллин 2"
+
+    item = normalize_items([{
+        "name": name,
+        "time": f"{hh:02d}:{mm:02d}",
+        "doses": doses,
+        "enabled": True,
+        "days": days or list(EVERY_DAY),
+    }])[0]
+    return item, None
+
+
+def days_label(days) -> str:
+    if not isinstance(days, list) or len(days) == 7:
+        return "каждый день"
+    return ", ".join(DAY_LABELS[d] for d in sorted(days) if 0 <= d <= 6)
+
+
+def format_items(items) -> list:
+    """Human readable schedule lines (numbered, for /del)."""
+    if not items:
+        return ["Расписание пустое."]
+    lines = []
+    for idx, it in enumerate(items, 1):
+        flag = "" if it.get("enabled", True) else " — выключено"
+        lines.append(
+            f"{idx}. {it.get('time')} — {it.get('name')} ({it.get('doses', 1)} шт.) "
+            f"· {days_label(it.get('days'))}{flag}"
+        )
+    return lines
+
+
 # ---------------------------------------------------------------- Telegram API
 
 
@@ -464,7 +556,12 @@ async function api(path, opts) {
   if (code) headers["X-Access-Code"] = code;
   const res = await fetch(path, Object.assign({ headers }, opts));
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  if (!res.ok) {
+    if (res.status === 403) {
+      throw new Error("нужен код доступа — введите его в поле «Код доступа» и нажмите «Сохранить»");
+    }
+    throw new Error(data.error || ("HTTP " + res.status));
+  }
   return data;
 }
 
@@ -547,7 +644,7 @@ async function load() {
     $("tzbadge").textContent = schedule.timezone || "";
     render();
   } catch (e) {
-    $("list").innerHTML = '<div class="empty">Не удалось загрузить расписание.</div>';
+    $("list").innerHTML = '<div class="empty">Не удалось загрузить расписание.<br>Введите код доступа в поле ниже и нажмите «Сохранить».</div>';
   }
 }
 
@@ -673,7 +770,7 @@ def make_handlers(tg: Telegram):
 
 
 async def handle_update(tg: Telegram, update: dict):
-    """Very small command handler: /start, /schedule, /stop."""
+    """Command handler: /start, /help, /add, /list, /del, /on, /off, /clear."""
     try:
         message = update.get("message") or update.get("edited_message")
         if not message:
@@ -691,26 +788,82 @@ async def handle_update(tg: Telegram, update: dict):
         schedule["chatId"] = chat_id
         write_json(SCHEDULE_FILE, schedule)
 
-        if text.startswith("/start") or text.startswith("/help"):
-            items = schedule.get("items", [])
-            lines = ["👋 Бот напоминаний о лекарствах.", ""]
-            if items:
-                lines.append("Ваше расписание:")
-                for it in items:
-                    lines.append(f"• {it['time']} — {it['name']} ({it['doses']} шт.)")
+        if not text.startswith("/"):
+            return
+        command = text.split()[0].split("@")[0].lower()
+
+        if command in ("/start", "/help"):
+            await tg.send_message(chat_id, HELP_TEXT)
+            return
+
+        if command in ("/schedule", "/list"):
+            lines = format_items(schedule.get("items", []))
+            await tg.send_message(chat_id, "Расписание приёмов:\n" + "\n".join(lines))
+            return
+
+        if command == "/add":
+            item, error = parse_add(text)
+            if error:
+                await tg.send_message(chat_id, error)
+                return
+            items = list(schedule.get("items", []))
+            items.append(item)
+            schedule["items"] = normalize_items(items)
+            save_schedule(schedule)
+            lines = format_items(schedule["items"])
+            await tg.send_message(
+                chat_id,
+                f"✅ Добавлено: {item['time']} — {item['name']} ({item['doses']} шт.)"
+                f" · {days_label(item['days'])}\n\nТекущее расписание:\n" + "\n".join(lines),
+            )
+            return
+
+        if command in ("/del", "/remove"):
+            items = list(schedule.get("items", []))
+            argument = text.split(maxsplit=1)[1].strip() if len(text.split()) > 1 else ""
+            if not argument:
+                await tg.send_message(
+                    chat_id, "Укажите номер приёма:\n" + "\n".join(format_items(items))
+                )
+                return
+            removed = []
+            if argument.isdigit():
+                index = int(argument)
+                if 1 <= index <= len(items):
+                    removed = [items.pop(index - 1)]
             else:
-                lines.append("Расписание пока пустое. Настройте его в веб-интерфейсе.")
-            await tg.send_message(chat_id, "\n".join(lines))
-        elif text.startswith("/schedule"):
-            items = schedule.get("items", [])
-            lines = ["Расписание приёмов:" if items else "Расписание пустое."]
-            for it in items:
-                lines.append(f"• {it['time']} — {it['name']} ({it['doses']} шт.)")
-            await tg.send_message(chat_id, "\n".join(lines))
-        elif text.startswith("/stop"):
-            await tg.send_message(chat_id, "Ок. Напоминания остановлены.")
+                removed = [it for it in items if str(it.get("time")) == argument]
+                items = [it for it in items if str(it.get("time")) != argument]
+            if not removed:
+                await tg.send_message(chat_id, "Не нашёл такой приём. Список приёмов: /list")
+                return
+            schedule["items"] = normalize_items(items)
+            save_schedule(schedule)
+            await tg.send_message(
+                chat_id,
+                "🗑 Удалено: " + ", ".join(f"{it.get('time')} {it.get('name')}" for it in removed),
+            )
+            return
+
+        if command in ("/on", "/off"):
+            enabled = command == "/on"
+            for it in schedule.get("items", []):
+                it["enabled"] = enabled
+            schedule["items"] = normalize_items(schedule.get("items", []))
+            save_schedule(schedule)
+            await tg.send_message(
+                chat_id,
+                "Напоминания включены." if enabled else "Напоминания выключены.",
+            )
+            return
+
+        if command in ("/clear", "/stop"):
             schedule["items"] = []
             save_schedule(schedule)
+            await tg.send_message(
+                chat_id, "Расписание очищено. Добавить приём: /add 09:30 Название 1"
+            )
+            return
     except Exception as exc:  # noqa: BLE001
         log.error("update handling failed: %s", exc)
 
