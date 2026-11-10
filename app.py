@@ -44,6 +44,9 @@ GIST_TOKEN = os.environ.get("GIST_TOKEN", "").strip()
 GIST_ID = os.environ.get("GIST_ID", "").strip()
 GIST_FILENAME = os.environ.get("GIST_FILENAME", "schedule.json").strip()
 ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID", "").strip()
+# Fallback chat for reminders. Free Render instances lose their local disk on
+# every restart, so the chat id is kept here as well.
+DEFAULT_CHAT_ID = os.environ.get("DEFAULT_CHAT_ID", "").strip()
 ACCESS_CODE = os.environ.get("ACCESS_CODE", "").strip()
 GRACE_MINUTES = max(1, int(os.environ.get("GRACE_MINUTES", "20")))
 
@@ -105,6 +108,8 @@ def load_schedule() -> dict:
     data.setdefault("timezone", TZ_NAME)
     data.setdefault("items", [])
     data.setdefault("updatedAt", None)
+    if not data.get("chatId") and DEFAULT_CHAT_ID:
+        data["chatId"] = DEFAULT_CHAT_ID
     return data
 
 
