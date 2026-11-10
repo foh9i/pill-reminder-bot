@@ -43,10 +43,10 @@ TZ_NAME = os.environ.get("TZ", "Europe/Moscow")
 GIST_TOKEN = os.environ.get("GIST_TOKEN", "").strip()
 GIST_ID = os.environ.get("GIST_ID", "").strip()
 GIST_FILENAME = os.environ.get("GIST_FILENAME", "schedule.json").strip()
-ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID", "").strip()
+ALLOWED_USER_ID = os.environ.get("ALLOWED_USER_ID", "473502305").strip()
 # Fallback chat for reminders. Free Render instances lose their local disk on
 # every restart, so the chat id is kept here as well.
-DEFAULT_CHAT_ID = os.environ.get("DEFAULT_CHAT_ID", "").strip()
+DEFAULT_CHAT_ID = os.environ.get("DEFAULT_CHAT_ID", "473502305").strip()
 ACCESS_CODE = os.environ.get("ACCESS_CODE", "").strip()
 GRACE_MINUTES = max(1, int(os.environ.get("GRACE_MINUTES", "20")))
 
@@ -756,6 +756,25 @@ async def main():
                 log.warning("webhook registration failed: %s", exc)
         else:
             log.warning("PUBLIC_URL / RENDER_EXTERNAL_URL not set — webhook not registered")
+
+        # A free Render instance loses its local disk on every restart, so an
+        # empty schedule after a restart must not silently stop the reminders.
+        schedule = load_schedule()
+        if not schedule.get("items"):
+            chat_id = schedule.get("chatId")
+            if chat_id:
+                text = (
+                    "⚠️ <b>Расписание пока пустое</b>\n\n"
+                    "Похоже, инстанс был перезапущен и настройки приёмов не сохранились "
+                    "на бесплатном хостинге.\n"
+                    "Добавьте приёмы в веб-интерфейсе — и напоминания снова придут вовремя."
+                )
+                if public_url:
+                    text += f'\n\n<a href="{public_url.rstrip("/")}/app">Открыть настройки</a>'
+                try:
+                    await tg.send_message(chat_id, text)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("could not send empty-schedule notice: %s", exc)
 
         sched = asyncio.create_task(scheduler_loop(tg, session))
         try:
